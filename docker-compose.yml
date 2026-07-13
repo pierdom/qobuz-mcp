@@ -1,0 +1,25 @@
+services:
+  qobuz-mcp:
+    container_name: qobuz-mcp
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      # Bind to your reverse-proxy's docker-network gateway IP so only the proxy (and the
+      # host) can reach it, not the LAN. Find it:
+      #   docker network inspect <npm_net> -f '{{(index .IPAM.Config 0).Gateway}}'
+      # Or use "8000:8000" to publish on all interfaces (LAN-exposed).
+      - "172.18.0.1:8000:8000"
+    volumes:
+      - qobuz-mcp-data:/data        # OIDCProxy encrypted client store (XDG_DATA_HOME)
+    environment:
+      QOBUZ_MCP_TRANSPORT: http
+      QOBUZ_MCP_HTTP_HOST: 0.0.0.0
+      QOBUZ_MCP_HTTP_PORT: 8000
+      # QOBUZ_EMAIL / QOBUZ_PASSWORD and OIDC_* come from .env (env_file above).
+      OIDC_CONFIG_URL: https://id.geon.im/.well-known/openid-configuration
+      OIDC_BASE_URL: https://qobuz.geon.im
+      OIDC_ALLOWED_REDIRECT_URIS: https://claude.ai/*,https://claude.com/*
+
+volumes:
+  qobuz-mcp-data:

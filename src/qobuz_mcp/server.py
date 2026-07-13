@@ -3,9 +3,11 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
+from fastmcp.server.auth.auth import AccessToken, AuthProvider
 
 from .client import QobuzClient, QobuzError
+from .config import config
 
 _client: QobuzClient | None = None
 
@@ -27,7 +29,53 @@ async def lifespan(server):
         await _client.close()
 
 
-mcp = FastMCP("qobuz-mcp", lifespan=lifespan)
+class _StaticBearerAuth(AuthProvider):
+    """Accepts exactly one pre-shared bearer token; rejects everything else."""
+
+    def __init__(self, token: str) -> None:
+        super().__init__()
+        self._token = token
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if token == self._token:
+            return AccessToken(token=token, client_id="homelab", scopes=[])
+        return None
+
+
+def _make_auth() -> AuthProvider | None:
+    """Auth provider for HTTP transport.
+
+    Precedence: OIDC (remote OAuth via an upstream IdP such as PocketID, required by
+    Claude's remote connectors) > static bearer token (machine-to-machine). stdio needs
+    no auth.
+    """
+    if config.transport != "http":
+        return None
+
+    if config.oidc_enabled:
+        from fastmcp.server.auth.oidc_proxy import OIDCProxy
+
+        return OIDCProxy(
+            config_url=config.oidc_config_url,
+            client_id=config.oidc_client_id,
+            client_secret=config.oidc_client_secret,
+            base_url=config.oidc_base_url,
+            redirect_path=config.oidc_redirect_path,
+            required_scopes=config.oidc_required_scopes,
+            allowed_client_redirect_uris=config.oidc_allowed_redirect_uris,
+            verify_id_token=config.oidc_verify_id_token,
+            forward_resource=config.oidc_forward_resource,
+        )
+
+    if not config.http_bearer_token:
+        raise RuntimeError(
+            "HTTP transport needs auth: set OIDC_* (config_url/client_id/client_secret/base_url) "
+            "or QOBUZ_MCP_HTTP_BEARER_TOKEN"
+        )
+    return _StaticBearerAuth(config.http_bearer_token)
+
+
+mcp = FastMCP("qobuz-mcp", lifespan=lifespan, auth=_make_auth())
 
 
 def _c() -> QobuzClient:
@@ -316,3 +364,48 @@ async def remove_tracks_from_playlist(
         "removed": len(playlist_track_ids),
         "status": "ok",
     })
+
+
+def _http_security_kwargs() -> dict:
+    """Host/Origin guard config for HTTP transport.
+
+    FastMCP (v3) only trusts localhost by default and returns 421 for a proxied Host
+    header. Behind a TLS reverse proxy the real controls are TLS + OAuth, so the guard
+    defaults OFF. Set MCP_HOST_ORIGIN_PROTECTION=true to harden: the public host/origin
+    (from OIDC_BASE_URL) and Claude's connector origins are then allowed automatically,
+    alongside any MCP_ALLOWED_HOSTS / MCP_ALLOWED_ORIGINS.
+    """
+    from urllib.parse import urlsplit
+
+    if not config.host_origin_protection:
+        return {"host_origin_protection": False}
+
+    allowed_hosts = list(config.allowed_hosts or [])
+    allowed_origins = list(config.allowed_origins or [])
+    if config.oidc_base_url:
+        parsed = urlsplit(config.oidc_base_url)
+        if parsed.hostname and parsed.hostname not in allowed_hosts:
+            allowed_hosts.append(parsed.hostname)
+        public_origin = f"{parsed.scheme}://{parsed.netloc}"
+        if public_origin not in allowed_origins:
+            allowed_origins.append(public_origin)
+    for claude_origin in ("https://claude.ai", "https://claude.com"):
+        if claude_origin not in allowed_origins:
+            allowed_origins.append(claude_origin)
+    return {
+        "host_origin_protection": True,
+        "allowed_hosts": allowed_hosts,
+        "allowed_origins": allowed_origins,
+    }
+
+
+def main() -> None:
+    if config.transport == "http":
+        mcp.run(
+            transport="streamable-http",
+            host=config.http_host,
+            port=config.http_port,
+            **_http_security_kwargs(),
+        )
+    else:
+        mcp.run(transport="stdio")
