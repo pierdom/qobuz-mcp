@@ -159,7 +159,7 @@ class QobuzClient:
         r_ts = ts - (ts % 600)
         clean = "".join(c for c in secret if c.isalnum())
         raw = f"trackgetFileUrlformat_id{format_id}intentstreamtrack_id{track_id}{r_ts}{clean}"
-        return hashlib.md5(raw.encode()).hexdigest(), ts
+        return hashlib.md5(raw.encode()).hexdigest(), r_ts
 
     # --- catalog ---
 
@@ -167,7 +167,7 @@ class QobuzClient:
         return await self._get("catalog/search", query=query, type=type, limit=limit)
 
     async def get_album(self, album_id: str) -> dict:
-        return await self._get("album/get", album_id=album_id, extra="tracks")
+        return await self._get("album/get", album_id=album_id)
 
     async def get_track(self, track_id: str) -> dict:
         return await self._get("track/get", track_id=track_id)
