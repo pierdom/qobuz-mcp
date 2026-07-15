@@ -141,7 +141,7 @@ def _fmt_playlist(p: dict) -> dict:
         "tracks_count": p.get("tracks_count", 0),
         "duration": _dur(p.get("duration", 0)),
         "is_public": p.get("is_public", False),
-        "description": p.get("description") or "",
+        "description": (p.get("description") or "")[:240],
     }
 
 
@@ -168,6 +168,16 @@ async def search(
 
     if type == "tracks":
         items = data.get("tracks", {}).get("items", [])
+        if items:
+            words = [w.lower() for w in query.split() if len(w) > 2]
+            def _score(t: dict) -> int:
+                title = t.get("title", "").lower()
+                artist = (
+                    (t.get("performer") or {}).get("name", "")
+                    or (t.get("album") or {}).get("artist", {}).get("name", "")
+                ).lower()
+                return sum(1 for w in words if w in title or w in artist)
+            items = sorted(items, key=_score, reverse=True)
         return _json([_fmt_track(t) for t in items])
 
     if type == "albums":
@@ -211,6 +221,7 @@ async def get_artist(artist_id: str) -> str:
     data = await _c().get_artist(artist_id)
     artist = _fmt_artist(data)
     albums = [_fmt_album(a) for a in data.get("albums", {}).get("items", [])]
+    artist["albums_count"] = len(albums)
     return _json({"artist": artist, "albums": albums})
 
 
