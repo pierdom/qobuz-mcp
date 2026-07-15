@@ -345,6 +345,17 @@ async def add_tracks_to_playlist(playlist_id: str, track_ids: list[str]) -> str:
 
 
 @mcp.tool()
+async def delete_playlist(playlist_id: str) -> str:
+    """Permanently delete a playlist.
+
+    Args:
+        playlist_id: The Qobuz playlist ID to delete
+    """
+    await _c().delete_playlist(playlist_id)
+    return _json({"playlist_id": playlist_id, "status": "deleted"})
+
+
+@mcp.tool()
 async def remove_tracks_from_playlist(
     playlist_id: str,
     playlist_track_ids: list[str],

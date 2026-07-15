@@ -276,3 +276,6 @@ class QobuzClient:
             playlist_id=playlist_id,
             playlist_track_ids=",".join(str(t) for t in playlist_track_ids),
         )
+
+    async def delete_playlist(self, playlist_id: str) -> dict:
+        return await self._post("playlist/delete", playlist_id=playlist_id)
