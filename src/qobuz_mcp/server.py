@@ -1,6 +1,7 @@
 import json
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any
 
 from fastmcp import FastMCP
@@ -90,6 +91,12 @@ def _dur(seconds: int) -> str:
     return f"{m}:{s:02d}"
 
 
+def _ts(unix: int | None) -> str | None:
+    if not unix:
+        return None
+    return datetime.fromtimestamp(unix, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
 def _fmt_track(t: dict) -> dict:
     artist = (
         t.get("performer", {}).get("name")
@@ -109,11 +116,13 @@ def _fmt_track(t: dict) -> dict:
         out["explicit"] = True
     if t.get("playlist_track_id"):
         out["playlist_track_id"] = t["playlist_track_id"]
+    if t.get("favorited_at"):
+        out["favorited_at"] = _ts(t["favorited_at"])
     return out
 
 
 def _fmt_album(a: dict) -> dict:
-    return {
+    out = {
         "album_id": a["id"],
         "title": a.get("title", ""),
         "artist": a.get("artist", {}).get("name", ""),
@@ -123,14 +132,20 @@ def _fmt_album(a: dict) -> dict:
         "genre": a.get("genre", {}).get("name", ""),
         "label": a.get("label", {}).get("name", ""),
     }
+    if a.get("favorited_at"):
+        out["favorited_at"] = _ts(a["favorited_at"])
+    return out
 
 
 def _fmt_artist(a: dict) -> dict:
-    return {
+    out = {
         "artist_id": a["id"],
         "name": a.get("name", ""),
         "albums_count": a.get("albums_count", 0),
     }
+    if a.get("favorited_at"):
+        out["favorited_at"] = _ts(a["favorited_at"])
+    return out
 
 
 def _fmt_playlist(p: dict) -> dict:
