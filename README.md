@@ -68,6 +68,7 @@ Restart Claude Desktop after editing the config.
 | `remove_tracks_from_playlist` | Remove tracks by their playlist position ID |
 | `update_playlist` | Rename or update a playlist's description |
 | `connect_status` | Your Qobuz Connect devices and what's playing on the active one |
+| `connect_get_queue` | The queue on the active device, in play order (current track marked, history and autoplay optional, paged) |
 | `connect_play` | Play tracks / an album / a playlist on a device (replaces its queue) |
 | `connect_control` | play, pause, next, previous, seek on the active device |
 | `connect_queue` | Add tracks to play next or at the end, without interrupting |

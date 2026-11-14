@@ -49,6 +49,16 @@ are vendored from there. Facts that shaped the design, all verified live:
   (`wait_for_player(..., since=t0)`): queue item ids restart at 0, so a stale
   "item 0, playing" would look like success.
 - `qws/createToken` works with the email/password session's app_id.
+- Join/leave per call is stable: 12 sequential and 3 concurrent joins (same
+  controller uuid) all saw the device list, same session id, no Disconnect,
+  and the renderer stayed registered. The device list (ADD_RENDERER) arrives
+  before SESSION_STATE. An empty list still settles 1.5 s and rejoins once on a
+  fresh token before being reported (`rejoined: true` in the status).
+- Failures are real MCP errors: `ConnectError` subclasses fastmcp's `ToolError`;
+  tools `raise ToolError(...)` rather than returning `{"error": ...}`. Messages
+  name what is online and the session/endpoint checked (`_online(c)`), and
+  `connect_status` returns a `connect` block {session, endpoint, rejoined} so a
+  failure report can be matched to a session.
 
 ## Development
 
