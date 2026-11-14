@@ -445,10 +445,16 @@ def _clock(seconds: float) -> str:
     return _dur(int(seconds))
 
 
+# Connect queues carry only track ids; each needs a track/get. Bound the fan-out
+# so a long queue doesn't fire hundreds of requests at once.
+_TRACK_FETCH_LIMIT = asyncio.Semaphore(10)
+
+
 async def _tracks_by_id(track_ids: list[int]) -> dict[int, dict]:
     async def one(tid: int) -> tuple[int, dict | None]:
         try:
-            return tid, _fmt_track(await _c().get_track(str(tid)))
+            async with _TRACK_FETCH_LIMIT:
+                return tid, _fmt_track(await _c().get_track(str(tid)))
         except QobuzError:
             return tid, None
 
@@ -515,6 +521,61 @@ async def connect_status() -> str:
     """
     async with _connect() as c:
         return _json(await _status(c))
+
+
+@mcp.tool()
+async def connect_get_queue(include_history: bool = False, offset: int = 0, limit: int = 50) -> str:
+    """List the tracks in the queue of the active Qobuz Connect device, in the
+    order they will play.
+
+    By default starts at the current track ("now_playing": true) and lists
+    what comes next; include_history=true starts from the beginning of the
+    queue (tracks already played). Tracks added automatically by Qobuz
+    autoplay after the queue are marked "autoplay": true. Use offset/limit
+    to page through long queues (limit max 200); the result says how many
+    tracks remain.
+
+    Args:
+        include_history: also list tracks before the current one
+        offset: skip this many tracks from the starting point
+        limit: max tracks to return (1–200, default 50)
+    """
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    async with _connect() as c:
+        if c.active_id is None:
+            raise ToolError(f"No active Connect device. {_online(c)}")
+        order = c.play_order()
+        autoplay_ids = {item_id for item_id, _ in c.autoplay}
+        p = c.player()
+        ids = [item_id for item_id, _ in order]
+        cur = ids.index(p.item_id) if p and p.item_id in ids else -1
+        start = 0 if include_history or cur < 0 else cur
+        window = list(enumerate(order))[start + offset : start + offset + limit]
+        info = await _tracks_by_id([tid for _, (_, tid) in window])
+        tracks = []
+        for pos, (item_id, tid) in window:
+            row: dict[str, Any] = {"position": pos + 1}
+            row.update(info.get(tid) or {"track_id": tid, "title": "(unavailable)"})
+            if pos == cur:
+                row["now_playing"] = True
+            elif pos < cur:
+                row["played"] = True
+            if item_id in autoplay_ids:
+                row["autoplay"] = True
+            tracks.append(row)
+        listed_until = start + offset + len(window)
+        return _json(
+            {
+                "device": c.devices[c.active_id].name if c.active_id in c.devices else None,
+                "queue_length": len(c.queue),
+                "autoplay_length": len(c.autoplay),
+                "current_position": cur + 1 if cur >= 0 else None,
+                "shuffle": c.shuffle,
+                "tracks": tracks,
+                "remaining_after_this_page": max(0, len(order) - listed_until),
+            }
+        )
 
 
 @mcp.tool()
