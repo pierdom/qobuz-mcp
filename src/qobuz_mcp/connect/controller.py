@@ -23,6 +23,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from fastmcp.exceptions import ToolError
 from websockets.asyncio.client import connect
 
 from . import wire
@@ -56,8 +57,9 @@ _QUALITY_NAMES = {
 _TYPE_NAMES = {v: k.removeprefix("DEVICE_TYPE_").lower() for k, v in qp.DeviceType.items()}
 
 
-class ConnectError(Exception):
-    pass
+class ConnectError(ToolError):
+    """A ToolError, so MCP clients get a real error result (isError) with this
+    message instead of a success that only says "error" inside the text."""
 
 
 @dataclass
@@ -94,6 +96,11 @@ class ConnectController:
         self.devices: dict[int, Device] = {}
         self.active_id: int | None = None
         self.session_seen = False
+        # Diagnostics, surfaced by connect_status so a failure report can be
+        # matched to a session: short session id, endpoint host, retried join.
+        self.session_id: str | None = None
+        self.endpoint: str | None = None
+        self.rejoined = False
         self.queue_version = qp.QueueVersion()
         self.queue: list[tuple[int, int]] = []  # (queue_item_id, track_id), queue order
         self.autoplay: list[tuple[int, int]] = []
@@ -107,7 +114,44 @@ class ConnectController:
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
     async def __aenter__(self) -> ConnectController:
+        await self._join()
+        if not self.devices:
+            # The device list normally arrives *before* SESSION_STATE (verified
+            # over many joins), but an empty list is what an agent acts on as
+            # "nothing online" — so give it a moment, then rejoin once on a
+            # fresh token/socket before believing it.
+            await self.wait(lambda: bool(self.devices), timeout=1.5)
+            if not self.devices:
+                self.rejoined = True
+                await self.__aexit__(None, None, None)
+                self._reset_state()
+                await self._join()
+                await self.wait(lambda: bool(self.devices), timeout=1.5)
+        self.ask_queue_state()
+        await self.wait(lambda: self.queue_seen, timeout=3.0)
+        if self.active_id is not None and self.active_id not in self.renderer_states:
+            self._send(
+                qp.QConnectMessage(
+                    message_type=qp.MESSAGE_TYPE_CTRL_SRVR_ASK_FOR_RENDERER_STATE,
+                    ctrl_srvr_ask_for_renderer_state=qp.CtrlSrvrAskForRendererState(
+                        renderer_id=self.active_id
+                    ),
+                )
+            )
+            await self.wait(lambda: self.active_id in self.renderer_states, timeout=2.0)
+        return self
+
+    def _reset_state(self) -> None:
+        self.self_id = None
+        self.devices = {}
+        self.active_id = None
+        self.session_seen = False
+        self.session_id = None
+        self.renderer_states = {}
+
+    async def _join(self) -> None:
         endpoint, jwt = await self._mint()
+        self.endpoint = endpoint.split("//")[-1].split("/")[0]
         self._ws = await connect(endpoint, max_size=None, open_timeout=self._timeout)
         self._msg_id = 2
         await self._ws.send(wire.handshake(1, jwt))
@@ -125,21 +169,11 @@ class ConnectController:
             )
         )
         if not await self.wait(lambda: self.session_seen):
+            errors = f" (server said: {'; '.join(self.errors)})" if self.errors else ""
             await self.__aexit__(None, None, None)
-            raise ConnectError("Qobuz Connect: no session state from the server")
-        self.ask_queue_state()
-        await self.wait(lambda: self.queue_seen, timeout=3.0)
-        if self.active_id is not None and self.active_id not in self.renderer_states:
-            self._send(
-                qp.QConnectMessage(
-                    message_type=qp.MESSAGE_TYPE_CTRL_SRVR_ASK_FOR_RENDERER_STATE,
-                    ctrl_srvr_ask_for_renderer_state=qp.CtrlSrvrAskForRendererState(
-                        renderer_id=self.active_id
-                    ),
-                )
+            raise ConnectError(
+                f"Qobuz Connect: joined {self.endpoint} but received no session state{errors}"
             )
-            await self.wait(lambda: self.active_id in self.renderer_states, timeout=2.0)
-        return self
 
     async def __aexit__(self, *exc: object) -> None:
         if self._reader is not None:
@@ -184,6 +218,7 @@ class ConnectController:
             s = m.srvr_ctrl_session_state
             self.active_id = s.active_renderer_id if s.active_renderer_id >= 0 else None
             self._note_version(s.queue_version)
+            self.session_id = s.session_uuid.hex()[:8] or None
             self.session_seen = True
         elif t == qp.MESSAGE_TYPE_SRVR_CTRL_ACTIVE_RENDERER_CHANGED:
             rid = m.srvr_ctrl_active_renderer_changed.active_renderer_id
@@ -266,7 +301,10 @@ class ConnectController:
         matches = exact or partial
         if not matches:
             names = ", ".join(d.name for d in self.devices.values()) or "none online"
-            raise ConnectError(f"No Connect device matching {query!r}. Available: {names}")
+            raise ConnectError(
+                f"No Connect device matching {query!r}. Available: {names} "
+                f"(session {self.session_id} via {self.endpoint})"
+            )
         if len(matches) > 1:
             names = ", ".join(d.name for d in matches)
             raise ConnectError(f"{query!r} matches several devices: {names}")

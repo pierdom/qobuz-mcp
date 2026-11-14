@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.auth import AccessToken, AuthProvider
 
 from .client import QobuzClient, QobuzError
@@ -429,6 +430,17 @@ def _connect():
     return ConnectController(_c().create_connect_token)
 
 
+def _online(c) -> str:  # c: ConnectController
+    """Who is online, and which session was checked — for error messages."""
+    names = ", ".join(d.name for d in c.devices.values())
+    where = f"session {c.session_id} via {c.endpoint}"
+    if names:
+        return f"online: {names} ({where})"
+    return (
+        f"no Connect devices online in {where}: open the Qobuz app or start qobit with --connect-on"
+    )
+
+
 def _clock(seconds: float) -> str:
     return _dur(int(seconds))
 
@@ -462,7 +474,11 @@ async def _status(c) -> dict:
     out: dict[str, Any] = {
         "devices": [_fmt_device(d, d.renderer_id == c.active_id) for d in c.devices.values()],
         "active_device": active.name if active else None,
+        # Diagnostics: lets a failure report be matched to a session/endpoint.
+        "connect": {"session": c.session_id, "endpoint": c.endpoint, "rejoined": c.rejoined},
     }
+    if not c.devices:
+        out["note"] = _online(c)
     p = c.player()
     if active is None or p is None:
         out["playback"] = None
@@ -519,7 +535,7 @@ async def connect_play(
     """
     sources = [x for x in (track_ids, album_id, playlist_id) if x]
     if len(sources) != 1:
-        return _json({"error": "Give exactly one of track_ids, album_id, playlist_id"})
+        raise ToolError("Give exactly one of track_ids, album_id, playlist_id")
     if track_ids:
         ids = [int(t) for t in track_ids]
     elif album_id:
@@ -529,32 +545,27 @@ async def connect_play(
         data = await _c().get_playlist(playlist_id)
         ids = [int(t["id"]) for t in data.get("tracks", {}).get("items", [])]
     if not ids:
-        return _json({"error": "No tracks found for that source"})
+        raise ToolError("No tracks found for that source")
     if not 0 <= start_index < len(ids):
-        return _json({"error": f"start_index must be between 0 and {len(ids) - 1}"})
+        raise ToolError(f"start_index must be between 0 and {len(ids) - 1}")
 
-    from .connect.controller import PLAYING, ConnectError
+    from .connect.controller import PLAYING
 
     async with _connect() as c:
-        try:
-            if device:
-                target = c.find_device(device)
-                if c.active_id != target.renderer_id:
-                    t_switch = time.time()
-                    if not await c.set_active(target.renderer_id):
-                        return _json({"error": f"{target.name} did not become the active device"})
-                    # Let the activation handover land first: the server sends the
-                    # new device the session's current (often paused) state, and if
-                    # that arrives after our queue load it can pause what we start.
-                    await c.wait_for_player(lambda p: True, since=t_switch, timeout=3.0)
-            elif c.active_id is None:
-                return _json(
-                    {"error": "No active Connect device — pass device=<name>", **await _status(c)}
-                )
-            t0 = time.time()
-            await c.load(ids, start_index)
-        except ConnectError as e:
-            return _json({"error": str(e)})
+        if device:
+            target = c.find_device(device)
+            if c.active_id != target.renderer_id:
+                t_switch = time.time()
+                if not await c.set_active(target.renderer_id):
+                    raise ToolError(f"{target.name} did not become the active device")
+                # Let the activation handover land first: the server sends the
+                # new device the session's current (often paused) state, and if
+                # that arrives after our queue load it can pause what we start.
+                await c.wait_for_player(lambda p: True, since=t_switch, timeout=3.0)
+        elif c.active_id is None:
+            raise ToolError(f"No active Connect device, pass device=<name>. {_online(c)}")
+        t0 = time.time()
+        await c.load(ids, start_index)
         started = await c.wait_for_player(lambda p: p.state == "playing", since=t0)
         if started is None:
             # Loaded but not playing (a renderer that doesn't autostart, or a late
@@ -582,7 +593,7 @@ async def connect_control(action: str, position_seconds: int | None = None) -> s
     action = action.strip().lower()
     async with _connect() as c:
         if c.active_id is None:
-            return _json({"error": "No active Connect device", **await _status(c)})
+            raise ToolError(f"No active Connect device. {_online(c)}")
         p = c.player()
         order = [i for i, _ in c.play_order()]
         cur = order.index(p.item_id) if p and p.item_id in order else -1
@@ -596,16 +607,16 @@ async def connect_control(action: str, position_seconds: int | None = None) -> s
         elif action in ("next", "previous"):
             j = cur + (1 if action == "next" else -1)
             if cur < 0 or not 0 <= j < len(order):
-                return _json({"error": f"No {action} track in the queue", **await _status(c)})
+                raise ToolError(f"No {action} track in the queue")
             await c.set_player_state(item_id=order[j])
             ok = lambda s, want=order[j]: s.item_id == want
         elif action == "seek":
             if position_seconds is None:
-                return _json({"error": "seek needs position_seconds"})
+                raise ToolError("seek needs position_seconds")
             await c.set_player_state(position_s=position_seconds)
             ok = lambda s: abs(s.position_s - position_seconds) < 5
         else:
-            return _json({"error": "action must be play, pause, next, previous or seek"})
+            raise ToolError("action must be play, pause, next, previous or seek")
         confirmed = await c.wait_for_player(ok, since=t0)
         result = await _status(c)
         result["confirmed"] = confirmed is not None
@@ -622,24 +633,20 @@ async def connect_queue(track_ids: list[str], position: str = "next") -> str:
         position: "next" (right after the current track) or "end" (after the
                   rest of the queue)
     """
-    from .connect.controller import ConnectError
 
     ids = [int(t) for t in track_ids]
     async with _connect() as c:
         if c.active_id is None:
-            return _json({"error": "No active Connect device", **await _status(c)})
+            raise ToolError(f"No active Connect device. {_online(c)}")
         p = c.player()
-        try:
-            if position == "next":
-                if p is None or p.item_id < 0:
-                    return _json({"error": "Nothing is playing — use connect_play instead"})
-                await c.insert_next(ids, after_item_id=p.item_id)
-            elif position == "end":
-                await c.add_last(ids)
-            else:
-                return _json({"error": 'position must be "next" or "end"'})
-        except ConnectError as e:
-            return _json({"error": str(e)})
+        if position == "next":
+            if p is None or p.item_id < 0:
+                raise ToolError("Nothing is playing, use connect_play instead")
+            await c.insert_next(ids, after_item_id=p.item_id)
+        elif position == "end":
+            await c.add_last(ids)
+        else:
+            raise ToolError('position must be "next" or "end"')
         # The echo carries only the inserted items; ask for the full snapshot so
         # the returned "up_next" reflects the change.
         c.queue_seen = False
@@ -656,15 +663,12 @@ async def connect_transfer(device: str, play: bool = True) -> str:
         device: device name or part of it, e.g. "qobit" or "iPhone"
         play: start playing on the new device (default true); false leaves it paused
     """
-    from .connect.controller import PLAYING, ConnectError
+    from .connect.controller import PLAYING
 
     async with _connect() as c:
-        try:
-            target = c.find_device(device)
-        except ConnectError as e:
-            return _json({"error": str(e)})
+        target = c.find_device(device)
         if not await c.set_active(target.renderer_id):
-            return _json({"error": f"{target.name} did not become the active device"})
+            raise ToolError(f"{target.name} did not become the active device")
         t0 = time.time()
         if play:
             await c.set_player_state(playing=PLAYING)
