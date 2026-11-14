@@ -8,6 +8,9 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server that connects
 - **Explore your library** — Claude can read your favorites and playlists to understand your taste and make grounded recommendations
 - **Curate playlists** — ask Claude to build a playlist from scratch, seed it with tracks it finds, then refine it by adding or removing tracks
 - **Research artists and albums** — get full discographies, tracklists, and metadata
+- **Control playback** — play, pause, skip, queue and move music between your
+  Qobuz Connect devices (the Qobuz phone app, a hi-fi streamer, or
+  [qobit](https://github.com/pierdom/qobit) on your desktop)
 
 ## Requirements
 
@@ -64,8 +67,33 @@ Restart Claude Desktop after editing the config.
 | `add_tracks_to_playlist` | Add tracks to an existing playlist |
 | `remove_tracks_from_playlist` | Remove tracks by their playlist position ID |
 | `update_playlist` | Rename or update a playlist's description |
+| `connect_status` | Your Qobuz Connect devices and what's playing on the active one |
+| `connect_play` | Play tracks / an album / a playlist on a device (replaces its queue) |
+| `connect_control` | play, pause, next, previous, seek on the active device |
+| `connect_queue` | Add tracks to play next or at the end, without interrupting |
+| `connect_transfer` | Move playback to another device |
+
+## Qobuz Connect playback control
+
+The `connect_*` tools drive whatever device is playing on your Qobuz account,
+through the Qobuz cloud — so they work wherever the MCP server runs (locally or
+remotely), with no network path to the device. Any Connect device works; with
+[qobit](https://github.com/pierdom/qobit) running (`qobit --connect-on`), an
+AI agent can DJ your desktop's bit-perfect playback.
+
+Each call joins your Connect session for about a second and leaves again, so
+"qobuz-mcp (AI remote)" may flash briefly in the apps' device picker. This is
+the community-documented Connect protocol, not an official Qobuz API.
 
 ## Usage examples
+
+**DJ on the desktop**
+> "Play something like Massive Attack's Mezzanine on qobit, then queue three
+> tracks in the same mood after it."
+
+**Move the music**
+> "What's playing right now? Move it to qobit and skip to the next track."
+
 
 **Discover music based on your taste**
 > "Look at my Qobuz favorites and suggest 5 albums I'd probably enjoy. Tell me why each one fits."

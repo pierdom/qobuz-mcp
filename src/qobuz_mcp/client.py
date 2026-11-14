@@ -163,6 +163,20 @@ class QobuzClient:
 
     # --- catalog ---
 
+    async def create_connect_token(self) -> tuple[str, str]:
+        """Mint a Qobuz Connect socket token: ``(endpoint, jwt)``. One token per
+        socket — the cloud evicts a second socket using the same token."""
+        r = await self._http.post(
+            API_BASE + "qws/createToken",
+            data={"jwt": "jwt_qws"},
+            headers={"X-App-Id": self._app_id or "", "X-User-Auth-Token": self.user_auth_token or ""},
+        )
+        self._raise_for_status(r)
+        tok = (r.json() or {}).get("jwt_qws") or {}
+        if not tok.get("jwt") or not tok.get("endpoint"):
+            raise QobuzError("Connect token missing from qws/createToken response")
+        return tok["endpoint"], tok["jwt"]
+
     async def search(self, query: str, type: str = "tracks", limit: int = 20) -> dict:
         return await self._get("catalog/search", query=query, type=type, limit=limit)
 

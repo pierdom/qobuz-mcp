@@ -11,6 +11,10 @@ dependencies = [
     "fastmcp>=2.0",
     "httpx>=0.27.0",
     "python-dotenv>=1.0.0",
+    # Qobuz Connect control (connect/): cloud websocket + protobuf messages.
+    # The vendored *_pb2.py check the protobuf runtime at import.
+    "protobuf>=7.36.1",
+    "websockets>=14.0",
 ]
 
 [project.scripts]

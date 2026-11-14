@@ -11,6 +11,10 @@ src/qobuz_mcp/
   __main__.py   entry point — loads .env, runs stdio transport
   server.py     FastMCP instance, lifespan, all tool definitions
   client.py     async httpx wrapper around the Qobuz API
+  connect/      Qobuz Connect controller (playback control on the user's devices)
+    proto/        generated protobuf modules + .proto (vendored from qobit)
+    wire.py       websocket framing (vendored from qobit — keep in sync)
+    controller.py ConnectController: short-lived controller session per call
 ```
 
 ## Key implementation details
@@ -26,6 +30,25 @@ Qobuz uses an MD5 signature: `md5("trackgetFileUrl" + "format_id" + str(format_i
 
 **playlist_track_id vs track_id**
 Removing tracks from a playlist requires `playlist_track_id` (the per-entry position ID), not the regular `track_id`. `get_playlist` returns both. Always call `get_playlist` before `remove_tracks_from_playlist`.
+
+**Qobuz Connect control** (`connect/`, `connect_*` tools)
+The protocol is reverse-engineered; the renderer side lives in qobit
+(github.com/pierdom/qobit, `docs/qobuz-connect.md`), and `proto/` + `wire.py`
+are vendored from there. Facts that shaped the design, all verified live:
+- The server rejects a join without a device, and *any* joined device is
+  listed as a renderer in the apps' picker — so each tool call opens a
+  short-lived session (`async with _connect() as c`) and leaves, instead of a
+  persistent socket.
+- Picking music = `CTRL_SRVR_QUEUE_LOAD_TRACKS`; the active renderer starts
+  `tracks[queue_position]` by itself. No separate "play" is needed, but
+  `connect_play` sends one as a fallback if the device doesn't report playing.
+- After `SET_ACTIVE_RENDERER`, wait for the new device's first report before
+  loading: the server's activation handover (often PAUSED) can otherwise land
+  after the load and pause it.
+- Confirmations only count renderer reports received *after* the command
+  (`wait_for_player(..., since=t0)`): queue item ids restart at 0, so a stale
+  "item 0, playing" would look like success.
+- `qws/createToken` works with the email/password session's app_id.
 
 ## Development
 

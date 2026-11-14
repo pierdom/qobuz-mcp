@@ -1,7 +1,9 @@
+import asyncio
 import json
 import os
+import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastmcp import FastMCP
@@ -86,6 +88,7 @@ def _c() -> QobuzClient:
 
 # --- format helpers ---
 
+
 def _dur(seconds: int) -> str:
     m, s = divmod(seconds, 60)
     return f"{m}:{s:02d}"
@@ -94,13 +97,12 @@ def _dur(seconds: int) -> str:
 def _ts(unix: int | None) -> str | None:
     if not unix:
         return None
-    return datetime.fromtimestamp(unix, tz=timezone.utc).strftime("%Y-%m-%d")
+    return datetime.fromtimestamp(unix, tz=UTC).strftime("%Y-%m-%d")
 
 
 def _fmt_track(t: dict) -> dict:
-    artist = (
-        t.get("performer", {}).get("name")
-        or t.get("album", {}).get("artist", {}).get("name", "Unknown")
+    artist = t.get("performer", {}).get("name") or t.get("album", {}).get("artist", {}).get(
+        "name", "Unknown"
     )
     out: dict[str, Any] = {
         "track_id": t["id"],
@@ -166,6 +168,7 @@ def _json(obj: Any) -> str:
 
 # --- tools ---
 
+
 @mcp.tool()
 async def search(
     query: str,
@@ -185,6 +188,7 @@ async def search(
         items = data.get("tracks", {}).get("items", [])
         if items:
             words = [w.lower() for w in query.split() if len(w) > 2]
+
             def _score(t: dict) -> int:
                 title = t.get("title", "").lower()
                 artist = (
@@ -192,6 +196,7 @@ async def search(
                     or (t.get("album") or {}).get("artist", {}).get("name", "")
                 ).lower()
                 return sum(1 for w in words if w in title or w in artist)
+
             items = sorted(items, key=_score, reverse=True)
         return _json([_fmt_track(t) for t in items])
 
@@ -250,14 +255,16 @@ async def get_streaming_url(track_id: str, quality: str = "FLAC_CD") -> str:
                  Higher qualities require a matching Qobuz subscription tier.
     """
     data = await _c().get_streaming_url(track_id, quality=quality)
-    return _json({
-        "url": data.get("url"),
-        "format_id": data.get("format_id"),
-        "mime_type": data.get("mime_type"),
-        "sampling_rate": data.get("sampling_rate"),
-        "bit_depth": data.get("bit_depth"),
-        "file_size": data.get("file_size"),
-    })
+    return _json(
+        {
+            "url": data.get("url"),
+            "format_id": data.get("format_id"),
+            "mime_type": data.get("mime_type"),
+            "sampling_rate": data.get("sampling_rate"),
+            "bit_depth": data.get("bit_depth"),
+            "file_size": data.get("file_size"),
+        }
+    )
 
 
 @mcp.tool()
@@ -327,11 +334,13 @@ async def create_playlist(
         is_public=is_public,
         track_ids=track_ids,
     )
-    return _json({
-        "playlist_id": data["id"],
-        "name": data.get("name"),
-        "status": "created",
-    })
+    return _json(
+        {
+            "playlist_id": data["id"],
+            "name": data.get("name"),
+            "status": "created",
+        }
+    )
 
 
 @mcp.tool()
@@ -363,11 +372,13 @@ async def add_tracks_to_playlist(playlist_id: str, track_ids: list[str]) -> str:
         track_ids: List of Qobuz track IDs to add
     """
     await _c().add_tracks_to_playlist(playlist_id, track_ids)
-    return _json({
-        "playlist_id": playlist_id,
-        "added": len(track_ids),
-        "status": "ok",
-    })
+    return _json(
+        {
+            "playlist_id": playlist_id,
+            "added": len(track_ids),
+            "status": "ok",
+        }
+    )
 
 
 @mcp.tool()
@@ -396,11 +407,271 @@ async def remove_tracks_from_playlist(
         playlist_track_ids: List of playlist_track_id values to remove
     """
     await _c().remove_tracks_from_playlist(playlist_id, playlist_track_ids)
-    return _json({
-        "playlist_id": playlist_id,
-        "removed": len(playlist_track_ids),
-        "status": "ok",
-    })
+    return _json(
+        {
+            "playlist_id": playlist_id,
+            "removed": len(playlist_track_ids),
+            "status": "ok",
+        }
+    )
+
+
+# --- Qobuz Connect: control playback on the user's devices ---
+#
+# Each call opens a short-lived controller session (connect/controller.py):
+# join the account's Connect session, act, confirm, leave. Works from anywhere
+# the MCP server runs — commands travel through the Qobuz cloud to the device.
+
+
+def _connect():
+    from .connect.controller import ConnectController
+
+    return ConnectController(_c().create_connect_token)
+
+
+def _clock(seconds: float) -> str:
+    return _dur(int(seconds))
+
+
+async def _tracks_by_id(track_ids: list[int]) -> dict[int, dict]:
+    async def one(tid: int) -> tuple[int, dict | None]:
+        try:
+            return tid, _fmt_track(await _c().get_track(str(tid)))
+        except QobuzError:
+            return tid, None
+
+    pairs = await asyncio.gather(*(one(t) for t in dict.fromkeys(track_ids)))
+    return {tid: t for tid, t in pairs if t}
+
+
+def _fmt_device(d, active: bool) -> dict:  # d: connect.controller.Device
+    out: dict[str, Any] = {"name": d.name, "type": d.type, "active": active}
+    # "Apple iPhone"; a model that repeats the brand ("qobit"/"qobit") once.
+    parts = [d.brand] if d.brand else []
+    if d.model and d.model.lower() not in (d.brand or "").lower():
+        parts.append(d.model)
+    if parts:
+        out["device"] = " ".join(parts)
+    if d.max_quality:
+        out["max_quality"] = d.max_quality
+    return out
+
+
+async def _status(c) -> dict:
+    active = c.devices.get(c.active_id) if c.active_id is not None else None
+    out: dict[str, Any] = {
+        "devices": [_fmt_device(d, d.renderer_id == c.active_id) for d in c.devices.values()],
+        "active_device": active.name if active else None,
+    }
+    p = c.player()
+    if active is None or p is None:
+        out["playback"] = None
+        return out
+    order = c.play_order()
+    ids = [i for i, _ in order]
+    cur = ids.index(p.item_id) if p.item_id in ids else -1
+    upcoming = order[cur + 1 : cur + 6] if cur >= 0 else []
+    want = ([order[cur][1]] if cur >= 0 else []) + [t for _, t in upcoming]
+    info = await _tracks_by_id(want)
+    out["playback"] = {
+        "state": p.state,
+        "position": f"{_clock(p.position_s)} / {_clock(p.duration_s)}",
+        "now_playing": info.get(order[cur][1]) if cur >= 0 else None,
+        "up_next": [info[t] for _, t in upcoming if t in info],
+        "queue_length": len(c.queue),
+        "queue_position": cur + 1 if cur >= 0 else None,
+        "shuffle": c.shuffle,
+    }
+    return out
+
+
+@mcp.tool()
+async def connect_status() -> str:
+    """Show the user's Qobuz Connect devices and what is playing.
+
+    Lists every Connect device currently online on the account (e.g. a qobit
+    desktop player, the Qobuz phone app, a hi-fi streamer) with its type,
+    brand/model and max_quality (mp3 < cd < hi-res L1 < L2 < L3 — prefer the
+    highest for hi-res listening) and, for the active one, the playback state,
+    position, current track and the next few tracks. Only devices connected
+    right now appear (an app must be open, qobit running with Connect on).
+    Call this first to learn device names before controlling playback.
+    """
+    async with _connect() as c:
+        return _json(await _status(c))
+
+
+@mcp.tool()
+async def connect_play(
+    track_ids: list[str] | None = None,
+    album_id: str | None = None,
+    playlist_id: str | None = None,
+    device: str | None = None,
+    start_index: int = 0,
+) -> str:
+    """Play music on a Qobuz Connect device, replacing its current queue.
+
+    Give exactly one source: track_ids (played in that order), album_id or
+    playlist_id. Playback starts at start_index (0-based) and the rest becomes
+    the queue. If device is given (case-insensitive name or part of it, e.g.
+    "qobit"), playback moves there first; otherwise the currently active device
+    plays. Returns what the device actually started playing.
+    """
+    sources = [x for x in (track_ids, album_id, playlist_id) if x]
+    if len(sources) != 1:
+        return _json({"error": "Give exactly one of track_ids, album_id, playlist_id"})
+    if track_ids:
+        ids = [int(t) for t in track_ids]
+    elif album_id:
+        data = await _c().get_album(album_id)
+        ids = [int(t["id"]) for t in data.get("tracks", {}).get("items", [])]
+    else:
+        data = await _c().get_playlist(playlist_id)
+        ids = [int(t["id"]) for t in data.get("tracks", {}).get("items", [])]
+    if not ids:
+        return _json({"error": "No tracks found for that source"})
+    if not 0 <= start_index < len(ids):
+        return _json({"error": f"start_index must be between 0 and {len(ids) - 1}"})
+
+    from .connect.controller import PLAYING, ConnectError
+
+    async with _connect() as c:
+        try:
+            if device:
+                target = c.find_device(device)
+                if c.active_id != target.renderer_id:
+                    t_switch = time.time()
+                    if not await c.set_active(target.renderer_id):
+                        return _json({"error": f"{target.name} did not become the active device"})
+                    # Let the activation handover land first: the server sends the
+                    # new device the session's current (often paused) state, and if
+                    # that arrives after our queue load it can pause what we start.
+                    await c.wait_for_player(lambda p: True, since=t_switch, timeout=3.0)
+            elif c.active_id is None:
+                return _json(
+                    {"error": "No active Connect device — pass device=<name>", **await _status(c)}
+                )
+            t0 = time.time()
+            await c.load(ids, start_index)
+        except ConnectError as e:
+            return _json({"error": str(e)})
+        started = await c.wait_for_player(lambda p: p.state == "playing", since=t0)
+        if started is None:
+            # Loaded but not playing (a renderer that doesn't autostart, or a late
+            # handover paused it): ask for playback explicitly.
+            t1 = time.time()
+            await c.set_player_state(playing=PLAYING)
+            started = await c.wait_for_player(lambda p: p.state == "playing", since=t1)
+        result = await _status(c)
+        result["started"] = started is not None
+        if started is None:
+            result["note"] = "Queue loaded, but the device has not reported playing yet"
+        return _json(result)
+
+
+@mcp.tool()
+async def connect_control(action: str, position_seconds: int | None = None) -> str:
+    """Control playback on the active Qobuz Connect device.
+
+    Args:
+        action: one of play, pause, next, previous, seek
+        position_seconds: target position for seek (seconds from track start)
+    """
+    from .connect.controller import PAUSED, PLAYING
+
+    action = action.strip().lower()
+    async with _connect() as c:
+        if c.active_id is None:
+            return _json({"error": "No active Connect device", **await _status(c)})
+        p = c.player()
+        order = [i for i, _ in c.play_order()]
+        cur = order.index(p.item_id) if p and p.item_id in order else -1
+        t0 = time.time()
+        if action == "play":
+            await c.set_player_state(playing=PLAYING)
+            ok = lambda s: s.state == "playing"
+        elif action == "pause":
+            await c.set_player_state(playing=PAUSED)
+            ok = lambda s: s.state == "paused"
+        elif action in ("next", "previous"):
+            j = cur + (1 if action == "next" else -1)
+            if cur < 0 or not 0 <= j < len(order):
+                return _json({"error": f"No {action} track in the queue", **await _status(c)})
+            await c.set_player_state(item_id=order[j])
+            ok = lambda s, want=order[j]: s.item_id == want
+        elif action == "seek":
+            if position_seconds is None:
+                return _json({"error": "seek needs position_seconds"})
+            await c.set_player_state(position_s=position_seconds)
+            ok = lambda s: abs(s.position_s - position_seconds) < 5
+        else:
+            return _json({"error": "action must be play, pause, next, previous or seek"})
+        confirmed = await c.wait_for_player(ok, since=t0)
+        result = await _status(c)
+        result["confirmed"] = confirmed is not None
+        return _json(result)
+
+
+@mcp.tool()
+async def connect_queue(track_ids: list[str], position: str = "next") -> str:
+    """Add tracks to the queue of the active Qobuz Connect device without
+    interrupting playback.
+
+    Args:
+        track_ids: Qobuz track IDs, in the order they should play
+        position: "next" (right after the current track) or "end" (after the
+                  rest of the queue)
+    """
+    from .connect.controller import ConnectError
+
+    ids = [int(t) for t in track_ids]
+    async with _connect() as c:
+        if c.active_id is None:
+            return _json({"error": "No active Connect device", **await _status(c)})
+        p = c.player()
+        try:
+            if position == "next":
+                if p is None or p.item_id < 0:
+                    return _json({"error": "Nothing is playing — use connect_play instead"})
+                await c.insert_next(ids, after_item_id=p.item_id)
+            elif position == "end":
+                await c.add_last(ids)
+            else:
+                return _json({"error": 'position must be "next" or "end"'})
+        except ConnectError as e:
+            return _json({"error": str(e)})
+        # The echo carries only the inserted items; ask for the full snapshot so
+        # the returned "up_next" reflects the change.
+        c.queue_seen = False
+        c.ask_queue_state()
+        await c.wait(lambda: c.queue_seen, timeout=3.0)
+        return _json({"added": len(ids), **await _status(c)})
+
+
+@mcp.tool()
+async def connect_transfer(device: str, play: bool = True) -> str:
+    """Move playback (and its queue) to another Qobuz Connect device.
+
+    Args:
+        device: device name or part of it, e.g. "qobit" or "iPhone"
+        play: start playing on the new device (default true); false leaves it paused
+    """
+    from .connect.controller import PLAYING, ConnectError
+
+    async with _connect() as c:
+        try:
+            target = c.find_device(device)
+        except ConnectError as e:
+            return _json({"error": str(e)})
+        if not await c.set_active(target.renderer_id):
+            return _json({"error": f"{target.name} did not become the active device"})
+        t0 = time.time()
+        if play:
+            await c.set_player_state(playing=PLAYING)
+            await c.wait_for_player(lambda s: s.state == "playing", since=t0)
+        else:
+            await c.wait_for_player(lambda s: True, since=t0, timeout=3.0)
+        return _json(await _status(c))
 
 
 def _http_security_kwargs() -> dict:
