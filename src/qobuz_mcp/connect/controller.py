@@ -44,6 +44,15 @@ _STATE_NAMES = {
     PLAYING: "playing",
     PAUSED: "paused",
 }
+# Device capability as advertised at join. The protocol only names levels;
+# higher = higher resolution (exact kHz per level isn't documented).
+_QUALITY_NAMES = {
+    qp.AUDIO_QUALITY_MP3: "mp3",
+    qp.AUDIO_QUALITY_CD: "cd",
+    qp.AUDIO_QUALITY_HIRES_LEVEL1: "hi-res L1",
+    qp.AUDIO_QUALITY_HIRES_LEVEL2: "hi-res L2",
+    qp.AUDIO_QUALITY_HIRES_LEVEL3: "hi-res L3",
+}
 _TYPE_NAMES = {v: k.removeprefix("DEVICE_TYPE_").lower() for k, v in qp.DeviceType.items()}
 
 
@@ -58,6 +67,7 @@ class Device:
     type: str
     brand: str
     model: str
+    max_quality: str | None
 
 
 @dataclass
@@ -166,6 +176,7 @@ class ConnectController:
                     _TYPE_NAMES.get(info.type, "unknown"),
                     info.brand,
                     info.model,
+                    _QUALITY_NAMES.get(info.capabilities.max_audio_quality),
                 )
         elif t == qp.MESSAGE_TYPE_SRVR_CTRL_REMOVE_RENDERER:
             self.devices.pop(m.srvr_ctrl_remove_renderer.renderer_id, None)

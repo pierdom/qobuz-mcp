@@ -444,13 +444,23 @@ async def _tracks_by_id(track_ids: list[int]) -> dict[int, dict]:
     return {tid: t for tid, t in pairs if t}
 
 
+def _fmt_device(d, active: bool) -> dict:  # d: connect.controller.Device
+    out: dict[str, Any] = {"name": d.name, "type": d.type, "active": active}
+    # "Apple iPhone"; a model that repeats the brand ("qobit"/"qobit") once.
+    parts = [d.brand] if d.brand else []
+    if d.model and d.model.lower() not in (d.brand or "").lower():
+        parts.append(d.model)
+    if parts:
+        out["device"] = " ".join(parts)
+    if d.max_quality:
+        out["max_quality"] = d.max_quality
+    return out
+
+
 async def _status(c) -> dict:
     active = c.devices.get(c.active_id) if c.active_id is not None else None
     out: dict[str, Any] = {
-        "devices": [
-            {"name": d.name, "type": d.type, "active": d.renderer_id == c.active_id}
-            for d in c.devices.values()
-        ],
+        "devices": [_fmt_device(d, d.renderer_id == c.active_id) for d in c.devices.values()],
         "active_device": active.name if active else None,
     }
     p = c.player()
@@ -480,8 +490,11 @@ async def connect_status() -> str:
     """Show the user's Qobuz Connect devices and what is playing.
 
     Lists every Connect device currently online on the account (e.g. a qobit
-    desktop player, the Qobuz phone app, a hi-fi streamer) and, for the active
-    one, the playback state, position, current track and the next few tracks.
+    desktop player, the Qobuz phone app, a hi-fi streamer) with its type,
+    brand/model and max_quality (mp3 < cd < hi-res L1 < L2 < L3 — prefer the
+    highest for hi-res listening) and, for the active one, the playback state,
+    position, current track and the next few tracks. Only devices connected
+    right now appear (an app must be open, qobit running with Connect on).
     Call this first to learn device names before controlling playback.
     """
     async with _connect() as c:
