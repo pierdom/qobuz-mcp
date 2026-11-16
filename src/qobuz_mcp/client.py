@@ -229,6 +229,42 @@ class QobuzClient:
     async def get_user_favorites(self, type: str = "tracks", limit: int = 50) -> dict:
         return await self._get("favorite/getUserFavorites", type=type, limit=limit)
 
+    async def _favorites(
+        self,
+        endpoint: str,
+        track_ids: list[str] | None,
+        album_ids: list[str] | None,
+        artist_ids: list[str] | None,
+    ) -> dict:
+        params = {
+            k: ",".join(str(i) for i in v)
+            for k, v in (
+                ("track_ids", track_ids),
+                ("album_ids", album_ids),
+                ("artist_ids", artist_ids),
+            )
+            if v
+        }
+        if not params:
+            raise QobuzError("No track, album, or artist IDs given")
+        return await self._post(endpoint, **params)
+
+    async def add_favorites(
+        self,
+        track_ids: list[str] | None = None,
+        album_ids: list[str] | None = None,
+        artist_ids: list[str] | None = None,
+    ) -> dict:
+        return await self._favorites("favorite/create", track_ids, album_ids, artist_ids)
+
+    async def remove_favorites(
+        self,
+        track_ids: list[str] | None = None,
+        album_ids: list[str] | None = None,
+        artist_ids: list[str] | None = None,
+    ) -> dict:
+        return await self._favorites("favorite/delete", track_ids, album_ids, artist_ids)
+
     async def get_user_playlists(self, limit: int = 50) -> dict:
         return await self._get("playlist/getUserPlaylists", limit=limit)
 
