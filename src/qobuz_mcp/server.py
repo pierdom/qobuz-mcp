@@ -293,6 +293,50 @@ async def get_user_favorites(type: str = "tracks", limit: int = 50) -> str:
     return _json(data)
 
 
+def _fav_counts(track_ids, album_ids, artist_ids) -> dict:
+    return {
+        "tracks": len(track_ids or []),
+        "albums": len(album_ids or []),
+        "artists": len(artist_ids or []),
+    }
+
+
+@mcp.tool()
+async def add_favorites(
+    track_ids: list[str] | None = None,
+    album_ids: list[str] | None = None,
+    artist_ids: list[str] | None = None,
+) -> str:
+    """Favorite tracks and albums, and follow artists (artists are followed
+    by favoriting them). Any combination of the lists can be given in one call.
+
+    Args:
+        track_ids: Qobuz track IDs to favorite
+        album_ids: Qobuz album IDs to favorite
+        artist_ids: Qobuz artist IDs to follow
+    """
+    await _c().add_favorites(track_ids, album_ids, artist_ids)
+    return _json({"added": _fav_counts(track_ids, album_ids, artist_ids), "status": "ok"})
+
+
+@mcp.tool()
+async def remove_favorites(
+    track_ids: list[str] | None = None,
+    album_ids: list[str] | None = None,
+    artist_ids: list[str] | None = None,
+) -> str:
+    """Unfavorite tracks and albums, and unfollow artists. Any combination of
+    the lists can be given in one call.
+
+    Args:
+        track_ids: Qobuz track IDs to unfavorite
+        album_ids: Qobuz album IDs to unfavorite
+        artist_ids: Qobuz artist IDs to unfollow
+    """
+    await _c().remove_favorites(track_ids, album_ids, artist_ids)
+    return _json({"removed": _fav_counts(track_ids, album_ids, artist_ids), "status": "ok"})
+
+
 @mcp.tool()
 async def get_user_playlists() -> str:
     """List all playlists owned by the current user."""
