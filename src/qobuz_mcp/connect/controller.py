@@ -129,17 +129,32 @@ class ConnectController:
                 await self.wait(lambda: bool(self.devices), timeout=1.5)
         self.ask_queue_state()
         await self.wait(lambda: self.queue_seen, timeout=3.0)
-        if self.active_id is not None and self.active_id not in self.renderer_states:
-            self._send(
-                qp.QConnectMessage(
-                    message_type=qp.MESSAGE_TYPE_CTRL_SRVR_ASK_FOR_RENDERER_STATE,
-                    ctrl_srvr_ask_for_renderer_state=qp.CtrlSrvrAskForRendererState(
-                        renderer_id=self.active_id
-                    ),
-                )
-            )
-            await self.wait(lambda: self.active_id in self.renderer_states, timeout=2.0)
+        await self._settle_active()
         return self
+
+    async def _settle_active(self) -> None:
+        """Let the active-renderer state settle before anyone reads it.
+
+        Devices online but no active id yet: ask every device for its state and
+        wait for the active id to arrive. Then make sure the active device's
+        own state has arrived. Whatever is still missing afterwards is reported
+        as unknown by the caller, never as idle.
+        """
+        if self.devices and self.active_id is None:
+            self.ask_renderer_state(*self.devices)
+            await self.wait(lambda: self.active_id is not None, timeout=3.0)
+        if self.active_id is not None and not self.has_state():
+            self.ask_renderer_state(self.active_id)
+            await self.wait(self.has_state, timeout=3.0)
+
+    def has_state(self, renderer_id: int | None = None) -> bool:
+        """Whether the renderer (default: the active one) has reported a real
+        state. The server answers ASK_FOR_RENDERER_STATE for *any* id, even one
+        that doesn't exist, with an empty state (PLAYING_STATE_UNKNOWN), so an
+        answer alone doesn't mean the state is known (verified live)."""
+        rid = self.active_id if renderer_id is None else renderer_id
+        st = self.renderer_states.get(rid) if rid is not None else None
+        return st is not None and st[0].playing_state != qp.PLAYING_STATE_UNKNOWN
 
     def _reset_state(self) -> None:
         self.self_id = None
@@ -317,6 +332,19 @@ class ConnectController:
         self._batch_id += 1
         data = wire.payload(self._msg_id, self._batch_id, list(messages))
         asyncio.get_running_loop().create_task(self._ws.send(data))
+
+    def ask_renderer_state(self, *renderer_ids: int) -> None:
+        self._send(
+            *(
+                qp.QConnectMessage(
+                    message_type=qp.MESSAGE_TYPE_CTRL_SRVR_ASK_FOR_RENDERER_STATE,
+                    ctrl_srvr_ask_for_renderer_state=qp.CtrlSrvrAskForRendererState(
+                        renderer_id=rid
+                    ),
+                )
+                for rid in renderer_ids
+            )
+        )
 
     def ask_queue_state(self) -> None:
         self._send(

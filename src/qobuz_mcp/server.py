@@ -485,6 +485,13 @@ def _online(c) -> str:  # c: ConnectController
     )
 
 
+def _state_unknown(c) -> str:  # c: ConnectController
+    name = c.devices[c.active_id].name if c.active_id in c.devices else f"renderer {c.active_id}"
+    return (
+        f"Playback state of {name} not received yet (unknown, not idle): try again. {_online(c)}"
+    )
+
+
 def _clock(seconds: float) -> str:
     return _dur(int(seconds))
 
@@ -530,8 +537,18 @@ async def _status(c) -> dict:
     if not c.devices:
         out["note"] = _online(c)
     p = c.player()
-    if active is None or p is None:
-        out["playback"] = None
+    # Never report a missing state as null: an agent reads null as "idle".
+    if not c.devices:
+        out["playback"] = {"state": "no device online"}
+        return out
+    if c.active_id is None:
+        out["playback"] = {"state": "unknown (no active device reported yet)"}
+        return out
+    if active is None:
+        out["playback"] = {"state": f"unknown (active renderer {c.active_id} not in device list)"}
+        return out
+    if p is None or not c.has_state():
+        out["playback"] = {"state": "unknown (not received yet)", "queue_length": len(c.queue)}
         return out
     order = c.play_order()
     ids = [i for i, _ in order]
@@ -559,7 +576,9 @@ async def connect_status() -> str:
     desktop player, the Qobuz phone app, a hi-fi streamer) with its type,
     brand/model and max_quality (mp3 < cd < hi-res L1 < L2 < L3 — prefer the
     highest for hi-res listening) and, for the active one, the playback state,
-    position, current track and the next few tracks. Only devices connected
+    position, current track and the next few tracks. playback.state is
+    "playing"/"paused"/"stopped", or "unknown (...)" when the session didn't
+    report it in time — unknown is not idle; call again. Only devices connected
     right now appear (an app must be open, qobit running with Connect on).
     Call this first to learn device names before controlling playback.
     """
@@ -591,7 +610,9 @@ async def connect_get_queue(include_history: bool = False, offset: int = 0, limi
             raise ToolError(f"No active Connect device. {_online(c)}")
         order = c.play_order()
         autoplay_ids = {item_id for item_id, _ in c.autoplay}
-        p = c.player()
+        # An empty (UNKNOWN) report carries item id 0, which would match the
+        # first queue entry: don't place "now playing" from it.
+        p = c.player() if c.has_state() else None
         ids = [item_id for item_id, _ in order]
         cur = ids.index(p.item_id) if p and p.item_id in ids else -1
         start = 0 if include_history or cur < 0 else cur
@@ -616,6 +637,11 @@ async def connect_get_queue(include_history: bool = False, offset: int = 0, limi
                 "autoplay_length": len(c.autoplay),
                 "current_position": cur + 1 if cur >= 0 else None,
                 "shuffle": c.shuffle,
+                **(
+                    {}
+                    if c.has_state()
+                    else {"note": "playback state not received yet: current track unknown"}
+                ),
                 "tracks": tracks,
                 "remaining_after_this_page": max(0, len(order) - listed_until),
             }
@@ -710,6 +736,8 @@ async def connect_control(action: str, position_seconds: int | None = None) -> s
             await c.set_player_state(playing=PAUSED)
             ok = lambda s: s.state == "paused"
         elif action in ("next", "previous"):
+            if not c.has_state():
+                raise ToolError(_state_unknown(c))
             j = cur + (1 if action == "next" else -1)
             if cur < 0 or not 0 <= j < len(order):
                 raise ToolError(f"No {action} track in the queue")
@@ -745,6 +773,8 @@ async def connect_queue(track_ids: list[str], position: str = "next") -> str:
             raise ToolError(f"No active Connect device. {_online(c)}")
         p = c.player()
         if position == "next":
+            if not c.has_state():
+                raise ToolError(_state_unknown(c))
             if p is None or p.item_id < 0:
                 raise ToolError("Nothing is playing, use connect_play instead")
             await c.insert_next(ids, after_item_id=p.item_id)

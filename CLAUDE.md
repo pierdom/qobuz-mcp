@@ -54,6 +54,16 @@ are vendored from there. Facts that shaped the design, all verified live:
   and the renderer stayed registered. The device list (ADD_RENDERER) arrives
   before SESSION_STATE. An empty list still settles 1.5 s and rejoins once on a
   fresh token before being reported (`rejoined: true` in the status).
+- After joining, the active renderer can be unset even with devices online.
+  The controller then asks every device for its renderer state and waits up
+  to 3 s for the active id, then up to 3 s for the active device's own state.
+  The server answers `ASK_FOR_RENDERER_STATE` for *any* renderer id (even a
+  made-up one) with an empty state (`PLAYING_STATE_UNKNOWN`), so only a
+  non-UNKNOWN state counts as received (`has_state()`). Anything still
+  missing is reported as `playback.state: "unknown (...)"`, never
+  `playback: null`, and commands that need the current track (`next`,
+  `previous`, queue `next`) refuse with "unknown, not idle" instead of
+  "nothing is playing".
 - Failures are real MCP errors: `ConnectError` subclasses fastmcp's `ToolError`;
   tools `raise ToolError(...)` rather than returning `{"error": ...}`. Messages
   name what is online and the session/endpoint checked (`_online(c)`), and
